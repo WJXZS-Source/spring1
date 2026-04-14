@@ -1,5 +1,6 @@
 # test_runner.py
 import json
+import os
 from pdf_parser import AcademicPDFParser
 from text_chunker import SemanticChunker
 from embedder import VectorProcessor
@@ -50,30 +51,33 @@ def test_pipeline(pdf_file_path):
         print(f"  - Metadata: {chunks[0]['metadata']}")
         print(f"  - Text (前150字): {chunks[0]['text'][:150]}...\n")
         
-        print("展示最后一个 Chunk 的详情:")
-        print(f"  - Metadata: {chunks[-1]['metadata']}")
-        print(f"  - Text (前150字): {chunks[-1]['text'][:150]}...\n")
-        
     # ---------------------------------------------------------
-    # 阶段 3: 测试向量化 (Embedding)
+    # 阶段 3: 测试向量化 (Embedding) 并且保存到本地
     # ---------------------------------------------------------
-    print(">>> [阶段3] 执行向量化并模拟入库...")
+    print(">>> [阶段3] 执行向量化并保存数据...")
     # 使用本地模型测试（不需要消耗 OpenAI API 额度）
     embedder = VectorProcessor(model_type="local")
     
-    # 为了防止本地测试过慢，我们只取前 3 个 Chunk 测试向量化
+    # 【注意】为了防止本地测试过慢，这里只取前 3 个 Chunk 测试向量化。
+    # 如果你想把整篇论文全部转成数据，请把下面的 `chunks[:3]` 改成 `chunks`
     test_chunks = chunks[:3]
     print(f"选取前 {len(test_chunks)} 个 Chunk 进行向量化测试...")
     
-    # 临时覆盖 embedder 中调用成员B的方法，改为打印输出
+    # 临时覆盖 embedder 中调用成员B的方法，改为写入本地 JSON 文件
     from embedder import MemberB_VectorDB
+    
     def mock_add_documents(documents):
-        print(f"✅ [Mock成员B接口] 成功接收 {len(documents)} 条向量数据！")
-        print(f"检查第一条数据结构:")
-        print(f"  - Text: 存在 ({len(documents[0]['text'])} 字符)")
-        print(f"  - Metadata: {documents[0]['metadata']}")
-        print(f"  - Vector 维度: {len(documents[0]['vector'])} 维 (正常应为 384 或 1536)")
-        print(f"  - Vector 预览: {documents[0]['vector'][:5]} ...")
+        print(f"\n✅ [Mock成员B接口] 成功接收 {len(documents)} 条向量数据！")
+        
+        # 定义输出的文件名
+        output_file = "output_data.json"
+        
+        # 将生成的最终数据写入 JSON 文件
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(documents, f, ensure_ascii=False, indent=2)
+            
+        print(f"💾 数据已成功写入文件！")
+        print(f"👉 请在当前目录下打开【 {os.path.abspath(output_file)} 】查看结果。")
         
     MemberB_VectorDB.add_documents = mock_add_documents
     
