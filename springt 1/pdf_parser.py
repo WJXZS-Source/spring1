@@ -1,78 +1,89 @@
-# pdf_parser.py
 import fitz  # PyMuPDF
 import re
 import logging
 import os
 
+# 配置日志输出格式
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class AcademicPDFParser:
-    def __init__(self, header_margin=50, footer_margin=50):
+    def __init__(self, header_ratio=0.08, footer_ratio=0.08):
         """
-        初始化解析器
-        :param header_margin: 页面顶部多少像素内被认为是页眉
-        :param footer_margin: 页面底部多少像素内被认为是页脚
+        初始化 PDF 解析器
+        :param header_ratio: 页面顶部 8% 区域判定为页眉
+        :param footer_ratio: 页面底部 8% 区域判定为页脚
         """
-        self.header_margin = header_margin
-        self.footer_margin = footer_margin
+        self.header_ratio = header_ratio
+        self.footer_ratio = footer_ratio
         
-        # 匹配学术论文常见的章节标题，如 "1. Introduction", "II. Related Work", "3 METHODOLOGY"
-        self.section_pattern = re.compile(r'^(I{1,3}|IV|V|VI{1,3}|IX|X|\d+(\.\d+)*)[\.\s]+[A-Z][a-zA-Z\s]+$')
+        # 论文结构识别 (支持数字编号如 "1. Introduction" 以及无编号如 "Abstract")
+        self.section_pattern = re.compile(
+            r'^(?:'
+            r'(?:(?:I{1,3}|IV|V|VI{1,3}|IX|X|\d+(?:\.\d+)*)[\.\s]+[A-Z][a-zA-Z\s]+)|'  
+            r'(?:Abstract|Introduction|Background|Methodology|Methods|'               
+            r'Experiments?|Results?|Discussion|Conclusion)'
+            r')$', 
+            re.IGNORECASE
+        )
         
         # 匹配参考文献标识
-        self.ref_pattern = re.compile(r'^(References|Bibliography|REFERENCES|BIBLIOGRAPHY)\s*$')
+        self.ref_pattern = re.compile(
+            r'^(?:(?:\d+(?:\.\d+)*|I{1,3}|IV|V|VI{1,3}|IX|X)[\.\s]+)?'
+            r'(?:References|Bibliography|REFERENCES|BIBLIOGRAPHY)\s*$', 
+            re.IGNORECASE
+        )
 
-    def parse(self, pdf_path, external_metadata=None):
+    def parse(self, pdf_path: str, external_metadata: dict = None) -> dict:
         """
-        解析单篇PDF
-        :param pdf_path: PDF文件路径
-        :param external_metadata: 外部传入的元数据(来自成员A的下载器，如标题、作者、年份)
-        :return: {"metadata": dict, "sections": [{"section_name": str, "content": str}]}
+        解析单篇学术 PDF 并提取结构化文本
+        :return: 包含 metadata 和 sections 的字典，若解析失败返回 None
         """
         if not os.path.exists(pdf_path):
-            logging.error(f"文件不存在: {pdf_path}")
+            logging.error(f"❌ 文件不存在: {pdf_path}")
             return None
 
         try:
             doc = fitz.open(pdf_path)
         except Exception as e:
-            logging.error(f"无法打开PDF {pdf_path}: {e}")
+            logging.error(f"❌ 无法打开 PDF {pdf_path}: {e}")
             return None
 
-        # 1. 异常PDF检测：检查是否为扫描版（前两页文本极少）
-        text_length = sum([len(page.get_text()) for page in doc[:2]])
-        if text_length < 100:
-            logging.warning(f"跳过扫描版或无文本层PDF: {pdf_path}")
+        # 异常 PDF 检测（跳过扫描版或无文本层）
+        check_pages = min(2, len(doc))
+        if check_pages > 0:
+            text_length = sum([len(page.get_text().strip()) for page in doc[:check_pages]])
+            if text_length < 100:
+                logging.warning(f"⚠️ [跳过扫描版/无文本层 PDF]: {pdf_path}")
+                doc.close()
+                return None
+        else:
             doc.close()
             return None
 
-        # 提取基础元数据
+        # 基础元数据对齐
         metadata = external_metadata or {}
         if not metadata:
             pdf_meta = doc.metadata
             metadata = {
-                "title": pdf_meta.get("title", os.path.basename(pdf_path)),
-                "author": pdf_meta.get("author", "Unknown"),
-                "year": pdf_meta.get("creationDate", "")[2:6] if pdf_meta.get("creationDate") else "Unknown",
-                "source_file": os.path.basename(pdf_path)
+                "title": pdf_meta.get("title") or os.path.basename(pdf_path),
+                "authors": pdf_meta.get("author", "Unknown"),
+                "year": int(pdf_meta.get("creationDate", "D:2024")[2:6]) if pdf_meta.get("creationDate") else 2024,
+                "arxiv_id": "Unknown",
+                "local_path": pdf_path
             }
 
         sections = []
-        current_section = "Abstract/Introduction"  # 默认起始章节
+        current_section = "Title_and_Abstract"
         current_content = []
         
-        page_height = doc[0].rect.height if len(doc) > 0 else 842 # 默认A4高度
-        
-        # 2. 逐页读取并清洗
         for page_num in range(len(doc)):
             page = doc[page_num]
-            # 获取文本块，包含坐标等信息，按照阅读顺序排序
+            page_height = page.rect.height if page.rect.height > 0 else 842
+            
             blocks = page.get_text("blocks", sort=True)
             
             for block in blocks:
                 x0, y0, x1, y1, text, block_no, block_type = block
-                
-                # 过滤非文本块(图像等)
                 if block_type != 0:
                     continue
                 
@@ -80,40 +91,40 @@ class AcademicPDFParser:
                 if not text:
                     continue
 
-                # 3. 启发式规则过滤页眉页脚
-                if y0 < self.header_margin or y1 > (page_height - self.footer_margin):
-                    # 也有可能是单行数字(页码)
+                # 启发式规则过滤页眉页脚
+                if y0 < (page_height * self.header_ratio) or y1 > (page_height * (1 - self.footer_ratio)):
                     if len(text) < 10 and text.isdigit():
                         continue 
-                    continue # 跳过页眉页脚块
+                    continue
 
-                # 4. 剔除参考文献及之后内容
-                if self.ref_pattern.match(text):
-                    logging.info(f"在 {pdf_path} 第 {page_num+1} 页检测到参考文献，停止提取后续内容。")
-                    # 保存当前收集的最后一个章节
+                # 核心逻辑: 剔除参考文献及之后的内容
+                first_line = text.split('\n')[0].strip()
+                if self.ref_pattern.match(first_line):
+                    logging.info(f"🛑 在 {os.path.basename(pdf_path)} 第 {page_num+1} 页检测到参考文献，安全截断。")
                     if current_content:
-                        sections.append({"section_name": current_section, "content": "\n".join(current_content)})
+                        sections.append({"section_name": current_section, "content": " ".join(current_content)})
                     doc.close()
                     return {"metadata": metadata, "sections": sections}
 
-                # 5. 章节标题识别
-                # 满足正则，且通常标题比较短（例如小于100个字符）
-                if len(text) < 100 and self.section_pattern.match(text.split('\n')[0]):
-                    # 保存上一个章节
+                # 章节标题识别
+                if len(first_line) < 150 and self.section_pattern.match(first_line):
                     if current_content:
-                        sections.append({"section_name": current_section, "content": "\n".join(current_content)})
-                    # 开启新章节
-                    current_section = text.replace('\n', ' ')
+                        sections.append({"section_name": current_section, "content": " ".join(current_content)})
+                    
+                    current_section = first_line.replace('\n', ' ')
                     current_content = []
+                    
+                    remaining_text = text[len(first_line):].strip()
+                    if remaining_text:
+                        remaining_text = remaining_text.replace('-\n', '').replace('\n', ' ')
+                        current_content.append(remaining_text)
                 else:
-                    # 去除论文中常见的换行连字符
-                    text = text.replace('-\n', '')
+                    text = text.replace('-\n', '').replace('\n', ' ')
                     current_content.append(text)
 
-        # 保存最后一节
         if current_content:
-            sections.append({"section_name": current_section, "content": "\n".join(current_content)})
+            sections.append({"section_name": current_section, "content": " ".join(current_content)})
 
         doc.close()
-        logging.info(f"成功解析PDF: {pdf_path}, 共提取 {len(sections)} 个主要章节。")
+        logging.info(f"✅ 成功解析 PDF: {os.path.basename(pdf_path)}, 共提取 {len(sections)} 个结构化章节。")
         return {"metadata": metadata, "sections": sections}
